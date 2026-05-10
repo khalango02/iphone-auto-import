@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Daemon that auto-imports new iPhone photos/videos to Photos.app when device is connected."""
 
+import asyncio
 import json
 import logging
 import os
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -53,26 +53,26 @@ def import_to_photos(file_path: str) -> bool:
     return result.returncode == 0
 
 
-def delete_from_device(afc, remote_path: str) -> bool:
+async def delete_from_device(afc, remote_path: str) -> bool:
     try:
-        afc.rm(remote_path)
+        await afc.rm(remote_path)
         return True
     except Exception as e:
         log.warning("Could not delete %s from device: %s", os.path.basename(remote_path), e)
         return False
 
 
-def list_dcim_files(afc) -> list[str]:
+async def list_dcim_files(afc) -> list:
     files = []
     try:
-        rolls = afc.listdir('/DCIM')
+        rolls = await afc.listdir('/DCIM')
     except Exception:
         return files
 
     for roll in rolls:
         roll_path = f'/DCIM/{roll}'
         try:
-            for fname in afc.listdir(roll_path):
+            for fname in await afc.listdir(roll_path):
                 if Path(fname).suffix.lower() in MEDIA_EXTENSIONS:
                     files.append(f'{roll_path}/{fname}')
         except Exception:
@@ -81,17 +81,17 @@ def list_dcim_files(afc) -> list[str]:
     return files
 
 
-def process_device() -> None:
+async def process_device() -> None:
     try:
         from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.services.afc import AfcService
     except ImportError:
         log.error("pymobiledevice3 not installed — run setup.sh first.")
-        time.sleep(60)
+        await asyncio.sleep(60)
         return
 
     try:
-        lockdown = create_using_usbmux(autopair=True)
+        lockdown = await create_using_usbmux(autopair=True)
     except Exception:
         return  # no device connected
 
@@ -99,9 +99,9 @@ def process_device() -> None:
     log.info("iPhone detected: %s", device_name)
 
     try:
-        with AfcService(lockdown) as afc:
+        async with AfcService(lockdown) as afc:
             imported = load_imported()
-            all_files = list_dcim_files(afc)
+            all_files = await list_dcim_files(afc)
             new_files = [f for f in all_files if f not in imported]
 
             if not new_files:
@@ -120,14 +120,14 @@ def process_device() -> None:
                     fname = os.path.basename(remote_path)
                     local_path = os.path.join(tmp, fname)
                     try:
-                        data = afc.get_file_contents(remote_path)
+                        data = await afc.get_file_contents(remote_path)
                         with open(local_path, 'wb') as f:
                             f.write(data)
 
                         if import_to_photos(local_path):
                             imported.add(remote_path)
                             if DELETE_AFTER_IMPORT:
-                                deleted = delete_from_device(afc, remote_path)
+                                deleted = await delete_from_device(afc, remote_path)
                                 log.info("  ✓ %s%s", fname, " (deleted from iPhone)" if deleted else "")
                             else:
                                 log.info("  ✓ %s", fname)
@@ -143,15 +143,19 @@ def process_device() -> None:
         log.warning("Device session error: %s", e)
 
 
-def main():
+async def main_loop():
     log.info(
         "iPhone import daemon started (interval: %ds, delete after import: %s)",
         POLL_INTERVAL,
         DELETE_AFTER_IMPORT,
     )
     while True:
-        process_device()
-        time.sleep(POLL_INTERVAL)
+        await process_device()
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+def main():
+    asyncio.run(main_loop())
 
 
 if __name__ == '__main__':
